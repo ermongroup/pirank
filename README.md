@@ -2,9 +2,9 @@
 
 This repository provides a reference implementation for learning PiRank-based models as described in the paper:
 
-> Learning to Rank via Differentiable Sorting   
-> [Robin Swezey](http://swezey.fr), [Bruno Charron](https://scholar.google.com/citations?user=klbU-o4AAAAJ), [Aditya Grover](https://aditya-grover.github.io), and [Stefano Ermon](https://cs.stanford.edu/~ermon/).  
-> Paper: https://arxiv.org/
+> PiRank: Learning to Rank via Differentiable Sorting   
+> [Robin Swezey](https://www.linkedin.com/in/robin-m-e-swezey/), [Aditya Grover](https://aditya-grover.github.io), [Bruno Charron](https://scholar.google.com/citations?user=klbU-o4AAAAJ) and [Stefano Ermon](https://cs.stanford.edu/~ermon/).  
+> Paper: https://arxiv.org/abs/2012.06731
 
 ## Requirements
 
