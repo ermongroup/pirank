@@ -61,7 +61,7 @@ Options are handled by Sacred (see _Examples_ section below).
 | Parameter | Default Value | Description |
 |----------|:-------------:|------:|
 | hidden_layers | "256,tanh,128,tanh,64,tanh" | Hidden layers for an example-wise feedforward network in the format _size,activation,...,size,activation_ |
-| num_features | 136 | Number of features per document |
+| num_features | 136 | Number of features per document. The default value is for MSLR and depends on the dataset (e.g. for Yahoo!, please change to 700). |
 | list_size | 100 | List size used for training |
 | group_size | 1 | Group size used in score function |
 
@@ -119,6 +119,27 @@ python3 pirank_simple.py with loss_fn=pirank_simple_loss \
     train_path=/data/MSLR-WEB30K/Fold1/train.txt \
     vali_path=/data/MSLR-WEB30K/Fold1/vali.txt \
     test_path=/data/MSLR-WEB30K/Fold1/test.txt \
+    num_features=136 \
+    optimizer=Adam \
+    learning_rate=0.00001 \
+    num_epochs=100 \
+    batch_size=16 \
+    model_dir=/tmp/model
+```
+
+_Run the benchmark experiment of section 4.1 with PiRank simple loss on Yahoo! C14_
+
+```
+cd pirank
+python3 pirank_simple.py with loss_fn=pirank_simple_loss \
+    ndcg_k=10 \
+    tau=5 \
+    list_size=80 \
+    hidden_layers=256,relu,256,relu,128,relu,64,relu \
+    train_path=/data/YAHOO/set1.train.txt \
+    vali_path=/data/YAHOO/set1.valid.txt \
+    test_path=/data/YAHOO/set1.test.txt \
+    num_features=700 \
     optimizer=Adam \
     learning_rate=0.00001 \
     num_epochs=100 \
@@ -138,6 +159,7 @@ python3 pirank_simple.py with loss_fn=lambda_rank_loss \
     train_path=/data/MSLR-WEB30K/Fold1/train.txt \
     vali_path=/data/MSLR-WEB30K/Fold1/vali.txt \
     test_path=/data/MSLR-WEB30K/Fold1/test.txt \
+    num_features=136 \
     optimizer=Adam \
     learning_rate=0.00001 \
     num_epochs=100 \
