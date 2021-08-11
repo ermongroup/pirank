@@ -278,8 +278,7 @@ def eval_metric_fns():
         for topn in [1, 3, 5, 10, 15]
     })
     metric_fns.update({
-        "metric/%s" % metric: tfr.metrics.make_ranking_metric_fn(
-            tfr.metrics.RankingMetricKey.NDCG)
+        "metric/%s" % metric: tfr.metrics.make_ranking_metric_fn(metric)
         for metric in [tfr.metrics.RankingMetricKey.MRR,
                        tfr.metrics.RankingMetricKey.ARP,
                        tfr.metrics.RankingMetricKey.ORDERED_PAIR_ACCURACY ]
