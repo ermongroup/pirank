@@ -1,10 +1,11 @@
 numpy==1.15.4
 scipy==1.1.0
-tensorflow==1.14.0
+#tensorflow==1.14.0
 # Uncomment below if using GPU
-# tensorflow-gpu==1.14.0
-# setGPU==0.0.7
+tensorflow-gpu==1.14.0
+setGPU==0.0.7
 tensorflow_ranking==0.1.4
 tensorflow-determinism==0.3.0
 sacred==0.8.1
 matplotlib==3.3.2
+submitit

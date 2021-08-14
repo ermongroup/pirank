@@ -1,25 +1,21 @@
-from sacred import Experiment
-from sacred.stflow import LogFileWriter
-from sacred.observers import SqlObserver, MongoObserver
-# Uncomment if using GPU
-# import setGPU
 import tensorflow as tf
-import tensorflow_ranking as tfr
+import tensorflow_ranking as tfr 
 from neuralsort.tf import util
-import time
-from tensorflow.python import debug as tf_debug
+import submitit
+import os
+import logging
 
+logging.getLogger('tensorflow').setLevel(logging.FATAL)
 
-ex = Experiment('PiRank')
 hook_train = None
 hook_vali = None
 hook_test = None
 # Uncomment these if you like to use TensorBoard debugging
 # hook = tf_debug.TensorBoardDebugHook("localhost:7001")
 # hook_train = hook_test = tf_debug.TensorBoardDebugHook("localhost:7000")
-tf.enable_eager_execution()
+tf.compat.v1.enable_eager_execution()
 tf.executing_eagerly()
-tf.logging.set_verbosity(tf.logging.INFO)
+# tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.INFO)
 
 
 # NeuralSort-related
@@ -29,11 +25,11 @@ flags.DEFINE_float('taustar', 1e-10, 'Temperature to use for trues (hard or soft
 flags.DEFINE_integer('num_epochs', 200, 'Number of epochs to train, set 0 to just test')
 flags.DEFINE_float('lr', 1e-4, 'initial learning rate')
 # Training-related
-flags.DEFINE_string("train_path", '/data/MSLR-WEB30K/Fold*/train.txt',
+flags.DEFINE_string("train_path", './data/Fold1/train.txt',
                     "Input file path used for training.")
-flags.DEFINE_string("vali_path", '/data/MSLR-WEB30K/Fold*/vali.txt',
+flags.DEFINE_string("vali_path", './data/Fold1/vali.txt',
                     "Input file path used for validation.")
-flags.DEFINE_string("test_path", '/data/MSLR-WEB30K/Fold*/test.txt',
+flags.DEFINE_string("test_path", './data/Fold1/test.txt',
                     "Input file path used for testing.")
 flags.DEFINE_string("model_dir", "/tmp",
                     "Output directory for models.")
@@ -61,28 +57,41 @@ flags.DEFINE_boolean('c', False, 'Comment for Sacred')
 flags.DEFINE_boolean('n', False, 'Name for Sacred')
 flags.DEFINE_boolean('m', False, 'MongoDB for Sacred')
 flags.DEFINE_boolean('s', False, 'SQL for Sacred')
+flags.DEFINE_boolean('submit', False, 'use cluster')
+flags.DEFINE_string('exp', 'dummy', 'experiment name')
 # NS
 FLAGS = flags.FLAGS
-
-
-# Put all TF flags in Sacred configuration. Equiv to:
-# ex.add_config({param: getattr(FLAGS, param) for param in dir(FLAGS)})
-@ex.config
-def sacred_config():
-    for param in dir(FLAGS):
-        if param != 'learning_rate':
-            locals()[param] = getattr(FLAGS, param)
+if FLAGS.submit:
+    FLAGS.exp = FLAGS.model_dir.split('/')[-1]
+    print(FLAGS.model_dir.split('/'))
+flag_dict = {}
+for attr,flag_obj in tf.flags.FLAGS.__flags.items():
+    flag_dict[attr] = getattr(FLAGS, attr)
+print(flag_dict["loss_fn"])
+# exit()
+# # Put all TF flags in Sacred configuration. Equiv to:
+# # ex.add_config({param: getattr(FLAGS, param) for param in dir(FLAGS)})
+# @ex.config
+# def sacred_config():
+#     for param in dir(FLAGS):
+#         if param != 'learning_rate':
+#             locals()[param] = getattr(FLAGS, param)
 
 
 # TFR
 # TODO Maybe switch with _train_input_fn (bookmark T)
-@ex.capture
-def input_fn(path, num_features, list_size, batch_size, num_epochs):
+# @ex.capture
+def input_fn(path):
     '''
     Takes a libSVM LETOR dataset and turns it into tensor format.
     # It is a list of dictionaries, one per query-document pair, where
     # each dictionary is a mapping from a feature ID to a feature value.
     '''
+    num_features = flag_dict["num_features"]
+    list_size = flag_dict["list_size"]
+    batch_size = flag_dict["batch_size"]
+    num_epochs = flag_dict["num_epochs"]
+
     train_dataset = tf.data.Dataset.from_generator(
         tfr.data.libsvm_generator(path, num_features, list_size),
         output_types=(
@@ -106,8 +115,9 @@ def input_fn(path, num_features, list_size, batch_size, num_epochs):
 # Here we formulate a scoring function using a feed forward network.
 # The function takes the features of a single example (i.e., query-document pair)
 # and produces a relevance score.
-@ex.capture
-def example_feature_columns(num_features):
+# @ex.capture
+def example_feature_columns():
+    num_features = flag_dict["num_features"]
     """Returns the example feature columns."""
     feature_names = [
         "%d" % (i + 1) for i in range(0, num_features)
@@ -128,8 +138,9 @@ def parse_arch(a):
 
 
 # Build the scoring NN for LETOR data
-@ex.capture
-def make_score_fn(hidden_layers):
+# @ex.capture
+def make_score_fn():
+    hidden_layers = flag_dict["hidden_layers"]
     def _score_fn(context_features, group_features, mode, params, config):
         """Defines the network to score a documents."""
         del params
@@ -155,8 +166,8 @@ def make_score_fn(hidden_layers):
     return _score_fn
 
 
-@ex.capture
-def neuralsort_permutation_loss(labels, logits, features, tau, taustar, ste):
+# @ex.capture
+def neuralsort_permutation_loss(labels, logits, features):
     '''
     Modeled after tensorflow_ranking/python/losses.py _loss_fn
     :param labels: True scores
@@ -164,6 +175,10 @@ def neuralsort_permutation_loss(labels, logits, features, tau, taustar, ste):
     :param tau: Temperature parameter
     :return:
     '''
+    tau = flag_dict["tau"]
+    taustar = flag_dict["taustar"]
+    ste = flag_dict["ste"]
+
     false_tensor = tf.convert_to_tensor(False)
     evaluation = tf.placeholder_with_default(false_tensor, ())
     temperature = tf.cond(evaluation,
@@ -186,14 +201,14 @@ def neuralsort_permutation_loss(labels, logits, features, tau, taustar, ste):
         P_hat = util.neuralsort(logits, temperature)
 
     losses = tf.nn.softmax_cross_entropy_with_logits_v2(
-        labels=P_true, logits=tf.log(P_hat + 1e-20), dim=2)
+        labels=P_true, logits=tf.log(P_hat + 1e-10), dim=2)
     losses = tf.reduce_mean(losses, axis=-1)
     loss = tf.reduce_mean(losses)
     return loss
 
 
-@ex.capture
-def pirank_simple_loss(labels, logits, features, tau, taustar, ndcg_k, ste):
+# @ex.capture
+def pirank_simple_loss(labels, logits, features):
     '''
     Modeled after tensorflow_ranking/python/losses.py _loss_fn
     :param labels: True scores
@@ -201,6 +216,11 @@ def pirank_simple_loss(labels, logits, features, tau, taustar, ndcg_k, ste):
     :param tau: Temperature parameter
     :return:
     '''
+    tau = flag_dict["tau"]
+    taustar = flag_dict["taustar"]
+    ndcg_k = flag_dict["ndcg_k"]
+    ste = flag_dict["ste"]
+
     with tf.name_scope("pirank_scope"):
         false_tensor = tf.convert_to_tensor(False)
         evaluation = tf.placeholder_with_default(false_tensor, ())
@@ -287,8 +307,8 @@ def eval_metric_fns():
     return metric_fns
 
 
-@ex.capture
-def get_estimator(hparams, optimizer, loss_fn, model_dir, ndcg_k):
+# @ex.capture
+def get_estimator(hparams, model_dir):
     """Create a ranking estimator.
 
     Args:
@@ -297,8 +317,14 @@ def get_estimator(hparams, optimizer, loss_fn, model_dir, ndcg_k):
     Returns:
       tf.learn `Estimator`.
     """
-    if loss_fn in globals():
-        loss_function = globals()[loss_fn]
+    optimizer = flag_dict["optimizer"]
+    loss_fn = flag_dict["loss_fn"]
+    ndcg_k = flag_dict["ndcg_k"]
+
+    if loss_fn == 'pirank_simple_loss':
+        loss_function = pirank_simple_loss
+    elif loss_fn == 'neuralsort_permutation_loss':
+        loss_function = neuralsort_permutation_loss
     elif loss_fn == 'lambda_rank_loss':
         loss_function = tfr.losses.make_loss_fn('pairwise_logistic_loss',
                                    lambda_weight=tfr.losses.create_ndcg_lambda_weight(topn=ndcg_k))
@@ -327,29 +353,79 @@ def get_estimator(hparams, optimizer, loss_fn, model_dir, ndcg_k):
         params=hparams,
         model_dir=model_dir)
 
+class Runner(submitit.helpers.Checkpointable):
+    def __init__(self):
+        pass
+
+    def __call__(self):
+
+        learning_rate = flag_dict["learning_rate"]
+        train_path = flag_dict["train_path"]
+        vali_path = flag_dict["vali_path"]
+        test_path = flag_dict["test_path"]
+        num_epochs = flag_dict["num_epochs"]
+        num_train_steps = flag_dict["num_train_steps"]
+        num_test_steps = flag_dict["num_test_steps"]
+        model_dir = flag_dict["model_dir"]
+
+        import os
+        os.environ['IS_TEST'] = ''
+        # if not model_dir and ex.current_run._id:
+        #     model_dir = '/tmp/model_{}'.format(ex.current_run._id)
+        #     ex.current_run.config['model_dir'] = model_dir
+        hparams = tf.contrib.training.HParams(learning_rate=learning_rate)
+        ranker = get_estimator(hparams, model_dir=model_dir)
+        #TODO Put back tensorboard stuff
+        train_spec = tf.estimator.TrainSpec(input_fn=lambda: input_fn(train_path),
+                                            max_steps=num_train_steps,
+                                            hooks=[hook_train] if hook_train else None)
+        vali_spec = tf.estimator.EvalSpec(input_fn=lambda: input_fn(vali_path),
+                                            hooks=[hook_vali] if hook_vali else None)
+        for epoch in range(num_epochs):
+            print('Epoch {} of {}'.format(epoch + 1, num_epochs))
+            print('Training and Validating')
+            tf.estimator.train_and_evaluate(ranker, train_spec, vali_spec)
+        print('Testing')
+        os.environ['IS_TEST'] = '1'
+        ranker.evaluate(input_fn=lambda: input_fn(test_path),
+                        steps=num_test_steps,
+                        hooks=[hook_test] if hook_test else None)
 
 # Automain is captured by Sacred
-@ex.automain
-@LogFileWriter(ex)
-def run_experiment(learning_rate, train_path, vali_path, test_path,
-                   num_epochs, num_train_steps, num_test_steps, model_dir):
-    if not model_dir and ex.current_run._id:
-        model_dir = '/tmp/model_{}'.format(ex.current_run._id)
-        ex.current_run.config['model_dir'] = model_dir
-    hparams = tf.contrib.training.HParams(learning_rate=learning_rate)
-    ranker = get_estimator(hparams, model_dir=model_dir)
-    #TODO Put back tensorboard stuff
-    train_spec = tf.estimator.TrainSpec(input_fn=lambda: input_fn(train_path),
-                                        max_steps=num_train_steps,
-                                        hooks=[hook_train] if hook_train else None)
-    vali_spec = tf.estimator.EvalSpec(input_fn=lambda: input_fn(vali_path),
-                                      hooks=[hook_vali] if hook_vali else None)
-    for epoch in range(num_epochs):
-        print('Epoch {} of {}'.format(epoch + 1, num_epochs))
-        print('Training and Validating')
-        tf.estimator.train_and_evaluate(ranker, train_spec, vali_spec)
-    print('Testing')
-    ranker.evaluate(input_fn=lambda: input_fn(test_path, num_epochs=1),
-                    steps=num_test_steps,
-                    hooks=[hook_test] if hook_test else None)
+# @ex.automain
+# @LogFileWriter(ex)
+def main():
+    if flag_dict["submit"]:
+    # if FLAGS.submit:
+        # slurm params
+        slurm_mem =  80
+        slurm_timeout =  72
+        slurm_partition = "learnlab"
+        num_gpus = 1
+        num_workers = 0
+        num_nodes = 1
+        print(flag_dict["submit"], flag_dict["exp"])
+        logdir =  "./logs/" + flag_dict["exp"]
 
+        executor = submitit.AutoExecutor(
+            folder=os.path.join(logdir, "slurm"), slurm_max_num_timeout=3
+        )
+        executor.update_parameters(
+            name=flag_dict["exp"],
+            mem_gb=slurm_mem,
+            timeout_min=slurm_timeout * 60,
+            slurm_partition=slurm_partition,
+            gpus_per_node=num_gpus,
+            cpus_per_task=(num_workers + 1),
+            tasks_per_node=1,
+            nodes=num_nodes
+        )
+        
+        job = executor.submit(Runner())
+        print('Submitted job:', job.job_id)
+    else:
+        Runner()()
+
+if __name__ == '__main__':
+
+    main()

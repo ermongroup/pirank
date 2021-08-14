@@ -2,17 +2,18 @@ from sacred import Experiment
 from sacred.stflow import LogFileWriter
 from sacred.observers import SqlObserver, MongoObserver
 # Uncomment if using GPU
-# import setGPU
+import setGPU
 from tfdeterminism import patch
 patch()
 import random
 import numpy as np
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
 import tensorflow as tf
 import tensorflow_ranking as tfr
 from neuralsort import tf as nstf
 from neuralsort.tf import util
 import time
-import os
 import math
 import six
 from tensorflow.python import debug as tf_debug
