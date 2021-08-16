@@ -1,5 +1,5 @@
 import tensorflow as tf
-import tensorflow_ranking as tfr 
+import tensorflow_ranking as tfr
 from neuralsort.tf import util
 import submitit
 import os
@@ -208,6 +208,194 @@ def neuralsort_permutation_loss(labels, logits, features):
 
 
 # @ex.capture
+def pirank_arp_simple_loss(labels, logits, features):
+    '''
+    Modeled after tensorflow_ranking/python/losses.py _loss_fn
+    :param labels: True scores
+    :param logits: Scores from the NN
+    :param tau: Temperature parameter
+    :return:
+    '''
+    tau = flag_dict["tau"]
+    taustar = flag_dict["taustar"]
+    ste = flag_dict["ste"]
+
+    with tf.name_scope("pirank_scope"):
+        false_tensor = tf.convert_to_tensor(False)
+        evaluation = tf.placeholder_with_default(false_tensor, ())
+
+        temperature = tf.cond(evaluation,
+                              false_fn=lambda: tf.convert_to_tensor(
+                                  tau, dtype=tf.float32),
+                              true_fn=lambda: tf.convert_to_tensor(
+                                  1e-10, dtype=tf.float32)  # simulate hard sort
+                              )
+
+        is_label_valid = tfr.utils.is_label_valid(labels)
+        labels = tf.where(is_label_valid, labels, tf.zeros_like(labels))
+        logits = tf.where(is_label_valid, logits, -1e-6 * tf.ones_like(logits) +
+                          tf.reduce_min(input_tensor=logits, axis=1, keepdims=True))
+        logits = tf.expand_dims(logits, 2, name="logits")
+        labels = tf.expand_dims(labels, 2, name="labels")
+        list_size = tf.shape(input=labels)[1]
+
+        if ste:
+            P_hat_backward = util.neuralsort(logits, temperature)
+            P_hat_forward = util.neuralsort(logits, taustar)
+            P_hat = P_hat_backward + tf.stop_gradient(P_hat_forward - P_hat_backward)
+        else:
+            P_hat = util.neuralsort(logits, temperature)
+        P_hat = tf.identity(P_hat, name="P_hat")
+        labels = tf.cast(labels, dtype=tf.float32, name="labels")
+        position = tf.cast(tf.range(1, list_size + 1), dtype=tf.float32, name="arp_position")
+        sorted_labels = tf.linalg.matmul(P_hat, labels)
+        numerator = tf.reduce_sum(sorted_labels * position, axis=1, name="arp_numerator")
+        denominator = tf.reduce_sum(labels, axis=1, name="arp_denominator")
+        loss = numerator / (1 + denominator)
+        return tf.reduce_sum(loss)
+
+
+# @ex.capture
+def anneal_temperature(tau, num_epochs):
+    # Annealing stuff
+    steps_per_epochs = 1183
+    total_steps = steps_per_epochs * num_epochs
+    start = tau
+    end = 1.
+    alpha = 10 ** ((math.log10(end) - math.log10(start)) / total_steps)
+    step = tf.cast(tf.train.get_global_step(), tf.float32)
+    # step = steps_per_epochs * 100 # For testing
+    tau = start * alpha ** step
+    return tau
+
+
+# @ex.capture
+def pirank_simple_loss_annealed(labels, logits, features):
+    tau = flag_dict["tau"]
+    taustar = flag_dict["taustar"]
+    ste = flag_dict["ste"]
+    ndcg_k = flag_dict["ndcg_k"]
+    num_epochs = flag_dict["num_epochs"]
+
+    with tf.name_scope("pirank_scope"):
+        false_tensor = tf.convert_to_tensor(False)
+        evaluation = tf.placeholder_with_default(false_tensor, ())
+
+        tau = anneal_temperature(tau, num_epochs)
+
+        temperature = tf.cond(evaluation,
+                              false_fn=lambda: tf.convert_to_tensor(
+                                  tau, dtype=tf.float32),
+                              true_fn=lambda: tf.convert_to_tensor(
+                                  1e-10, dtype=tf.float32)  # simulate hard sort
+                              )
+
+        is_label_valid = tfr.utils.is_label_valid(labels)
+        labels = tf.where(is_label_valid, labels, tf.zeros_like(labels))
+        logits = tf.where(is_label_valid, logits, -1e-6 * tf.ones_like(logits) +
+                          tf.reduce_min(input_tensor=logits, axis=1, keepdims=True))
+        logits = tf.expand_dims(logits, 2, name="logits")
+        labels = tf.expand_dims(labels, 2, name="labels")
+        list_size = tf.shape(input=labels)[1]
+
+        if ste:
+            P_hat_backward = util.neuralsort(logits, temperature)
+            P_hat_forward = util.neuralsort(logits, taustar)
+            P_hat = P_hat_backward + tf.stop_gradient(P_hat_forward - P_hat_backward)
+        else:
+            P_hat = util.neuralsort(logits, temperature)
+        P_hat = tf.identity(P_hat, name="P_hat")
+        label_powers = tf.pow(2.0, tf.cast(labels, dtype=tf.float32), name="label_powers") - 1.0
+        sorted_powers = tf.linalg.matmul(P_hat, label_powers)
+        numerator = tf.reduce_sum(sorted_powers, axis=-1, name="dcg_numerator")
+        position = tf.cast(tf.range(1, list_size + 1), dtype=tf.float32, name="dcg_position")
+        denominator = tf.math.log(position + 1, name="dcg_denominator")
+        dcg = numerator / denominator
+        dcg = dcg[:, :ndcg_k]
+        dcg = tf.reduce_sum(input_tensor=dcg, axis=1, keepdims=True, name="dcg")
+
+        P_true = util.neuralsort(labels, 1e-10)
+        ideal_sorted_labels = tf.linalg.matmul(P_true, labels)
+        ideal_sorted_labels = tf.reduce_sum(ideal_sorted_labels, axis=-1,
+                                            name="ideal_sorted_labels")
+        numerator = tf.pow(2.0, tf.cast(ideal_sorted_labels, dtype=tf.float32),
+                           name="ideal_dcg_numerator") - 1.0
+        ideal_dcg = numerator / (1e-10 + denominator)
+        ideal_dcg = ideal_dcg[:, :ndcg_k]
+        ideal_dcg = tf.reduce_sum(ideal_dcg, axis=1, keepdims=True, name="dcg")
+        ndcg = tf.reduce_sum(dcg) / (1e-10 + tf.reduce_sum(ideal_dcg))
+        return 1. - ndcg
+
+
+# @ex.capture
+def pirank_simple_mean_loss(labels, logits, features):
+    '''
+    Modeled after tensorflow_ranking/python/losses.py _loss_fn
+    :param labels: True scores
+    :param logits: Scores from the NN
+    :param tau: Temperature parameter
+    :return:
+    '''
+    tau = flag_dict["tau"]
+    taustar = flag_dict["taustar"]
+    ndcg_k = flag_dict["ndcg_k"]
+    ste = flag_dict["ste"]
+
+    with tf.name_scope("pirank_scope"):
+        false_tensor = tf.convert_to_tensor(False)
+        evaluation = tf.placeholder_with_default(false_tensor, ())
+
+        temperature = tf.cond(evaluation,
+                              false_fn=lambda: tf.convert_to_tensor(
+                                  tau, dtype=tf.float32),
+                              true_fn=lambda: tf.convert_to_tensor(
+                                  1e-10, dtype=tf.float32)  # simulate hard sort
+                              )
+
+        is_label_valid = tfr.utils.is_label_valid(labels)
+        labels = tf.where(is_label_valid, labels, tf.zeros_like(labels))
+        logits = tf.where(is_label_valid, logits, -1e-6 * tf.ones_like(logits) +
+                          tf.reduce_min(input_tensor=logits, axis=1, keepdims=True))
+        logits = tf.expand_dims(logits, 2, name="logits")
+        labels = tf.expand_dims(labels, 2, name="labels")
+        list_size = tf.shape(input=labels)[1]
+
+        if ste:
+            P_hat_backward = util.neuralsort(logits, temperature)
+            P_hat_forward = util.neuralsort(logits, taustar)
+            P_hat = P_hat_backward + tf.stop_gradient(P_hat_forward - P_hat_backward)
+        else:
+            P_hat = util.neuralsort(logits, temperature)
+        P_hat = tf.identity(P_hat, name="P_hat")
+        label_powers = tf.pow(2.0, tf.cast(labels, dtype=tf.float32), name="label_powers") - 1.0
+        sorted_powers = tf.linalg.matmul(P_hat, label_powers)
+        numerator = tf.reduce_sum(sorted_powers, axis=-1, name="dcg_numerator")
+        position = tf.cast(tf.range(1, list_size + 1), dtype=tf.float32, name="dcg_position")
+        denominator = tf.math.log(position + 1, name="dcg_denominator")
+        dcg = numerator / denominator
+        dcg = dcg[:, :ndcg_k]
+        dcg = tf.reduce_sum(input_tensor=dcg, axis=1, keepdims=True, name="dcg")
+
+        P_true = util.neuralsort(labels, 1e-10)
+        ideal_sorted_labels = tf.linalg.matmul(P_true, labels)
+        ideal_sorted_labels = tf.reduce_sum(ideal_sorted_labels, axis=-1,
+                                            name="ideal_sorted_labels")
+        numerator = tf.pow(2.0, tf.cast(ideal_sorted_labels, dtype=tf.float32),
+                           name="ideal_dcg_numerator") - 1.0
+        ideal_dcg = numerator / denominator
+        ideal_dcg = ideal_dcg[:, :ndcg_k]
+        ideal_dcg = tf.reduce_sum(ideal_dcg, axis=1, keepdims=True, name="ideal_dcg")
+        def safe_div(numerator, denominator):
+            return tf.where(
+                tf.equal(denominator, 0),
+                tf.zeros_like(numerator),
+                tf.compat.v1.div(numerator, denominator))
+        ndcg = tf.reduce_mean(1. - safe_div(dcg, 1e-6 + ideal_dcg))
+        # ndcg = safe_div(tf.reduce_sum(ideal_dcg * safe_div(dcg, ideal_dcg_k)), tf.reduce_sum(ideal_dcg))
+        return ndcg
+
+
+# @ex.capture
 def pirank_simple_loss(labels, logits, features):
     '''
     Modeled after tensorflow_ranking/python/losses.py _loss_fn
@@ -385,6 +573,11 @@ class Runner(submitit.helpers.Checkpointable):
             print('Epoch {} of {}'.format(epoch + 1, num_epochs))
             print('Training and Validating')
             tf.estimator.train_and_evaluate(ranker, train_spec, vali_spec)
+        #
+        # if loss_fn == 'pirank_simple_loss_annealed':
+        #     tau = anneal_temperature(num_epochs)
+        #     print(f'Annealed Temperature: {tf.get_default_session().run(tau)}')
+        #
         print('Testing')
         os.environ['IS_TEST'] = '1'
         ranker.evaluate(input_fn=lambda: input_fn(test_path),
@@ -420,7 +613,7 @@ def main():
             tasks_per_node=1,
             nodes=num_nodes
         )
-        
+
         job = executor.submit(Runner())
         print('Submitted job:', job.job_id)
     else:

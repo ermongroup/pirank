@@ -134,8 +134,8 @@ cd pirank
 python3 pirank_simple.py with loss_fn=pirank_simple_loss \
     ndcg_k=10 \
     tau=5 \
-    list_size=80 \
-    hidden_layers=256,relu,256,relu,128,relu,64,relu \
+    list_size=100 \
+    hidden_layers==256,relu,256,relu,128,relu,128,relu,64,relu,64,relu \
     train_path=/data/YAHOO/set1.train.txt \
     vali_path=/data/YAHOO/set1.valid.txt \
     test_path=/data/YAHOO/set1.test.txt \
