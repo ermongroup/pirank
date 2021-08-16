@@ -60,8 +60,15 @@ from absl import flags
 
 import numpy as np
 import six
-import tensorflow as tf
+# import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
 import tensorflow_ranking as tfr
+
+import submitit
+import os
+import sys
+from neuralsort.tf import util
 
 flags.DEFINE_string("train_path", None, "Input file path used for training.")
 flags.DEFINE_string("vali_path", None, "Input file path used for validation.")
@@ -69,11 +76,11 @@ flags.DEFINE_string("test_path", None, "Input file path used for testing.")
 flags.DEFINE_string("output_dir", None, "Output directory for models.")
 
 flags.DEFINE_integer("train_batch_size", 32, "The batch size for training.")
-flags.DEFINE_integer("num_train_steps", 100000, "Number of steps for training.")
+flags.DEFINE_integer("num_train_steps", None, "Number of steps for training.")
 
 flags.DEFINE_float("learning_rate", 0.01, "Learning rate for optimizer.")
 flags.DEFINE_float("dropout_rate", 0.5, "The dropout rate before output layer.")
-flags.DEFINE_list("hidden_layer_dims", ["256", "128", "64"],
+flags.DEFINE_list("hidden_layer_dims", ["1024", "512", "256"],
                   "Sizes for hidden layers.")
 
 flags.DEFINE_integer("num_features", 136, "Number of features per document.")
@@ -89,7 +96,36 @@ flags.DEFINE_float(
     "secondary_loss_weight", 0.5, "The weight for the secondary loss in "
                                   "multi-objective learning.")
 
+# Additional learning options
+flags.DEFINE_string("optimizer", "Adagrad", "The optimizer for gradient descent.")
+flags.DEFINE_integer('num_epochs', 200, 'Number of epochs to train, set 0 to just test')
+
+# NeuralSort-related
+flags.DEFINE_float('tau', 5, 'temperature (dependent meaning)')
+flags.DEFINE_float('taustar', 1e-10, 'Temperature to use for trues (hard or soft sort)')
+flags.DEFINE_float('lr', 1e-4, 'initial learning rate')
+
+# Submit-related
+flags.DEFINE_boolean('submit', False, 'use cluster')
+flags.DEFINE_string('exp', 'dummy', 'experiment name')
+
+## PiRank-related
+flags.DEFINE_string("loss_fn", "pirank_simple_loss",
+                    "The loss function to use (either a TFR RankingLossKey, or loss function from the script).")
+flags.DEFINE_boolean('ste', True, 'Whether to use the Straight-Through Estimator')
+flags.DEFINE_integer('ndcg_k', 15, 'NDCG@k cutoff when using NS-NDCG loss')
+
 FLAGS = flags.FLAGS
+FLAGS(sys.argv)
+
+# NS addition
+if FLAGS.submit:
+    FLAGS.exp = FLAGS.output_dir.split('/')[-1]
+    print(FLAGS.output_dir.split('/'))
+flag_dict = {}
+for attr,flag_obj in FLAGS.__flags.items():
+    flag_dict[attr] = getattr(FLAGS, attr)
+print(flag_dict["loss"])
 
 _PRIMARY_HEAD = "primary_head"
 _SECONDARY_HEAD = "secondary_head"
@@ -97,7 +133,7 @@ _SECONDARY_HEAD = "secondary_head"
 
 def _use_multi_head():
     """Returns True if using multi-head."""
-    return FLAGS.secondary_loss is not None
+    return flag_dict['secondary_loss'] is not None
 
 
 class IteratorInitializerHook(tf.estimator.SessionRunHook):
@@ -115,7 +151,7 @@ class IteratorInitializerHook(tf.estimator.SessionRunHook):
 
 def example_feature_columns():
     """Returns the example feature columns."""
-    feature_names = ["{}".format(i + 1) for i in range(FLAGS.num_features)]
+    feature_names = ["{}".format(i + 1) for i in range(flag_dict['num_features'])]
     return {
         name:
             tf.feature_column.numeric_column(name, shape=(1,), default_value=0.0)
@@ -275,10 +311,10 @@ def make_transform_fn():
         if mode == tf.estimator.ModeKeys.PREDICT:
             # We expect tf.Example as input during serving. In this case, group_size
             # must be set to 1.
-            if FLAGS.group_size != 1:
+            if flag_dict['group_size'] != 1:
                 raise ValueError(
                     "group_size should be 1 to be able to export model, but get %s" %
-                    FLAGS.group_size)
+                    flag_dict['group_size'])
             context_features, example_features = (
                 tfr.feature.encode_pointwise_features(
                     features=features,
@@ -321,7 +357,7 @@ def make_score_fn():
         is_training = (mode == tf.estimator.ModeKeys.TRAIN)
         cur_layer = tf.compat.v1.layers.batch_normalization(
             input_layer, training=is_training)
-        for i, layer_width in enumerate(int(d) for d in FLAGS.hidden_layer_dims):
+        for i, layer_width in enumerate(int(d) for d in flag_dict['hidden_layer_dims']):
             cur_layer = tf.compat.v1.layers.dense(cur_layer, units=layer_width)
             cur_layer = tf.compat.v1.layers.batch_normalization(
                 cur_layer, training=is_training)
@@ -329,8 +365,8 @@ def make_score_fn():
             tf.compat.v1.summary.scalar("fully_connected_{}_sparsity".format(i),
                                         tf.nn.zero_fraction(cur_layer))
         cur_layer = tf.compat.v1.layers.dropout(
-            cur_layer, rate=FLAGS.dropout_rate, training=is_training)
-        logits = tf.compat.v1.layers.dense(cur_layer, units=FLAGS.group_size)
+            cur_layer, rate=flag_dict['dropout_rate'], training=is_training)
+        logits = tf.compat.v1.layers.dense(cur_layer, units=flag_dict['group_size'])
         if _use_multi_head():
             # Duplicate the logits for both heads.
             return {_PRIMARY_HEAD: logits, _SECONDARY_HEAD: logits}
@@ -340,11 +376,74 @@ def make_score_fn():
     return _score_fn
 
 
+# @ex.capture
+def pirank_simple_loss(labels, logits, weights):
+    '''
+    Modeled after tensorflow_ranking/python/losses.py _loss_fn
+    :param labels: True scores
+    :param logits: Scores from the NN
+    :param tau: Temperature parameter
+    :return:
+    '''
+    tau = flag_dict["tau"]
+    taustar = flag_dict["taustar"]
+    ndcg_k = flag_dict["ndcg_k"]
+    ste = flag_dict["ste"]
+
+    with tf.name_scope("pirank_scope"):
+        false_tensor = tf.convert_to_tensor(False)
+        evaluation = tf.placeholder_with_default(false_tensor, ())
+
+        temperature = tf.cond(evaluation,
+                              false_fn=lambda: tf.convert_to_tensor(
+                                  tau, dtype=tf.float32),
+                              true_fn=lambda: tf.convert_to_tensor(
+                                  1e-10, dtype=tf.float32)  # simulate hard sort
+                              )
+
+        is_label_valid = tfr.utils.is_label_valid(labels)
+        labels = tf.where(is_label_valid, labels, tf.zeros_like(labels))
+        logits = tf.where(is_label_valid, logits, -1e-6 * tf.ones_like(logits) +
+                          tf.reduce_min(input_tensor=logits, axis=1, keepdims=True))
+        logits = tf.expand_dims(logits, 2, name="logits")
+        labels = tf.expand_dims(labels, 2, name="labels")
+        list_size = tf.shape(input=labels)[1]
+
+        if ste:
+            P_hat_backward = util.neuralsort(logits, temperature)
+            P_hat_forward = util.neuralsort(logits, taustar)
+            P_hat = P_hat_backward + tf.stop_gradient(P_hat_forward - P_hat_backward)
+        else:
+            P_hat = util.neuralsort(logits, temperature)
+        P_hat = tf.identity(P_hat, name="P_hat")
+        label_powers = tf.pow(2.0, tf.cast(labels, dtype=tf.float32), name="label_powers") - 1.0
+        sorted_powers = tf.linalg.matmul(P_hat, label_powers)
+        numerator = tf.reduce_sum(sorted_powers, axis=-1, name="dcg_numerator")
+        position = tf.cast(tf.range(1, list_size + 1), dtype=tf.float32, name="dcg_position")
+        denominator = tf.math.log(position + 1, name="dcg_denominator")
+        dcg = numerator / denominator
+        dcg = dcg[:, :ndcg_k]
+        dcg = tf.reduce_sum(input_tensor=dcg, axis=1, keepdims=True, name="dcg")
+
+        P_true = util.neuralsort(labels, 1e-10)
+        ideal_sorted_labels = tf.linalg.matmul(P_true, labels)
+        ideal_sorted_labels = tf.reduce_sum(ideal_sorted_labels, axis=-1,
+                                            name="ideal_sorted_labels")
+        numerator = tf.pow(2.0, tf.cast(ideal_sorted_labels, dtype=tf.float32),
+                           name="ideal_dcg_numerator") - 1.0
+        ideal_dcg = numerator / (1e-10 + denominator)
+        ideal_dcg = ideal_dcg[:, :ndcg_k]
+        ideal_dcg = tf.reduce_sum(ideal_dcg, axis=1, keepdims=True, name="dcg")
+        ndcg = tf.reduce_sum(dcg) / (1e-10 + tf.reduce_sum(ideal_dcg))
+        return 1. - ndcg
+
+
 def get_eval_metric_fns():
     """Returns a dict from name to metric functions."""
     metric_fns = {}
     metric_fns.update({
         "metric/%s" % name: tfr.metrics.make_ranking_metric_fn(name) for name in [
+            tfr.metrics.RankingMetricKey.MRR,
             tfr.metrics.RankingMetricKey.ARP,
             tfr.metrics.RankingMetricKey.ORDERED_PAIR_ACCURACY,
         ]
@@ -359,21 +458,38 @@ def get_eval_metric_fns():
 
 def train_and_eval():
     """Train and Evaluate."""
+    import os
+    os.environ['IS_TEST'] = ''
 
-    features, labels = load_libsvm_data(FLAGS.train_path, FLAGS.list_size)
+    features, labels = load_libsvm_data(flag_dict['train_path'], flag_dict['list_size'])
     train_input_fn, train_hook = get_train_inputs(features, labels,
-                                                  FLAGS.train_batch_size)
+                                                  flag_dict['train_batch_size'])
 
-    features_vali, labels_vali = load_libsvm_data(FLAGS.vali_path,
-                                                  FLAGS.list_size)
+    features_vali, labels_vali = load_libsvm_data(flag_dict['vali_path'],
+                                                  flag_dict['list_size'])
     vali_input_fn, vali_hook = get_eval_inputs(features_vali, labels_vali)
 
-    features_test, labels_test = load_libsvm_data(FLAGS.test_path,
-                                                  FLAGS.list_size)
+    features_test, labels_test = load_libsvm_data(flag_dict['test_path'],
+                                                  flag_dict['list_size'])
     test_input_fn, test_hook = get_eval_inputs(features_test, labels_test)
 
-    optimizer = tf.compat.v1.train.AdagradOptimizer(
-        learning_rate=FLAGS.learning_rate)
+    if flag_dict['optimizer'].lower() == 'adam':
+        optimizer = tf.compat.v1.train.AdamOptimizer(
+            learning_rate=flag_dict['learning_rate'])
+    elif flag_dict['optimizer'].lower() == 'adagrad':
+        optimizer = tf.compat.v1.train.AdagradOptimizer(
+            learning_rate=flag_dict['learning_rate'])
+
+    loss_fn = flag_dict['loss']
+    if loss_fn == 'pirank_simple_loss':
+        loss_function = pirank_simple_loss
+    elif loss_fn == 'neuralsort_permutation_loss':
+        loss_function = neuralsort_permutation_loss
+    elif loss_fn == 'lambda_rank_loss':
+        loss_function = tfr.losses.make_loss_fn('pairwise_logistic_loss',
+                                                lambda_weight=tfr.losses.create_ndcg_lambda_weight(topn=ndcg_k))
+    else:
+        loss_function = tfr.losses.make_loss_fn(loss_fn)
 
     def _train_op_fn(loss):
         """Defines train op used in ranking head."""
@@ -385,38 +501,38 @@ def train_and_eval():
 
     if _use_multi_head():
         primary_head = tfr.head.create_ranking_head(
-            loss_fn=tfr.losses.make_loss_fn(FLAGS.loss),
+            loss_fn=loss_function,
             eval_metric_fns=get_eval_metric_fns(),
             train_op_fn=_train_op_fn,
             name=_PRIMARY_HEAD)
         secondary_head = tfr.head.create_ranking_head(
-            loss_fn=tfr.losses.make_loss_fn(FLAGS.secondary_loss),
+            loss_fn=tfr.losses.make_loss_fn(flag_dict['secondary_loss']),
             eval_metric_fns=get_eval_metric_fns(),
             train_op_fn=_train_op_fn,
             name=_SECONDARY_HEAD)
         ranking_head = tfr.head.create_multi_ranking_head(
-            [primary_head, secondary_head], [1.0, FLAGS.secondary_loss_weight])
+            [primary_head, secondary_head], [1.0, flag_dict['secondary_loss_weight']])
     else:
         ranking_head = tfr.head.create_ranking_head(
-            loss_fn=tfr.losses.make_loss_fn(FLAGS.loss),
+            loss_fn=loss_function,
             eval_metric_fns=get_eval_metric_fns(),
             train_op_fn=_train_op_fn)
 
     estimator = tf.estimator.Estimator(
         model_fn=tfr.model.make_groupwise_ranking_fn(
             group_score_fn=make_score_fn(),
-            group_size=FLAGS.group_size,
+            group_size=flag_dict['group_size'],
             transform_fn=make_transform_fn(),
             ranking_head=ranking_head),
         config=tf.estimator.RunConfig(
-            FLAGS.output_dir, save_checkpoints_steps=1000))
+            flag_dict['output_dir'], save_checkpoints_steps=1000))
 
     train_spec = tf.estimator.TrainSpec(
         input_fn=train_input_fn,
         hooks=[train_hook],
-        max_steps=FLAGS.num_train_steps)
+        max_steps=flag_dict['num_train_steps'])
     # Export model to accept tf.Example when group_size = 1.
-    if FLAGS.group_size == 1:
+    if flag_dict['group_size'] == 1:
         vali_spec = tf.estimator.EvalSpec(
             input_fn=vali_input_fn,
             hooks=[vali_hook],
@@ -435,16 +551,63 @@ def train_and_eval():
             throttle_secs=30)
 
     # Train and validate
+    # num_epochs = flag_dict['num_epochs']
+    # for epoch in range(num_epochs):
+    #     print('Epoch {} of {}'.format(epoch + 1, num_epochs))
+    #     print('Training and Validating')
+    #     tf.estimator.train_and_evaluate(estimator, train_spec, vali_spec)
     tf.estimator.train_and_evaluate(estimator, train_spec, vali_spec)
 
     # Evaluate on the test data.
+    print('Testing')
+    os.environ['IS_TEST'] = '1'
     estimator.evaluate(input_fn=test_input_fn, hooks=[test_hook])
 
 
-def main(_):
+class Runner(submitit.helpers.Checkpointable):
+    def __init__(self):
+        pass
+
+    def __call__(self):
+        train_and_eval()
+
+
+
+def main():
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.INFO)
 
-    train_and_eval()
+
+    if flag_dict["submit"]:
+        # if flag_dict['submit']:
+        # slurm params
+        slurm_mem =  80
+        slurm_timeout =  72
+        slurm_partition = "learnlab"
+        num_gpus = 1
+        num_workers = 0
+        num_nodes = 1
+        print(flag_dict["submit"], flag_dict["exp"])
+        logdir =  "./logs/" + flag_dict["exp"]
+
+        executor = submitit.AutoExecutor(
+            folder=os.path.join(logdir, "slurm"), slurm_max_num_timeout=3
+        )
+        executor.update_parameters(
+            name=flag_dict["exp"],
+            mem_gb=slurm_mem,
+            timeout_min=slurm_timeout * 60,
+            slurm_partition=slurm_partition,
+            gpus_per_node=num_gpus,
+            cpus_per_task=(num_workers + 1),
+            tasks_per_node=1,
+            nodes=num_nodes
+        )
+
+        job = executor.submit(Runner())
+        print('Submitted job:', job.job_id)
+    # If submit turned off just use what's in _call()
+    else:
+        Runner()()
 
 
 if __name__ == "__main__":
@@ -453,4 +616,6 @@ if __name__ == "__main__":
     flags.mark_flag_as_required("test_path")
     flags.mark_flag_as_required("output_dir")
 
-    tf.compat.v1.app.run()
+    main()
+    # tf.compat.v1.app.run()
+    # Goes inside main after
