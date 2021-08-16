@@ -60,15 +60,19 @@ from absl import flags
 
 import numpy as np
 import six
-# import tensorflow as tf
-import tensorflow.compat.v1 as tf
-tf.disable_v2_behavior()
-import tensorflow_ranking as tfr
 
 import submitit
 import os
 import sys
 from neuralsort.tf import util
+
+# import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
+import tensorflow_ranking as tfr
+
+flags = tf.app.flags
+FLAGS = flags.FLAGS
 
 flags.DEFINE_string("train_path", None, "Input file path used for training.")
 flags.DEFINE_string("vali_path", None, "Input file path used for validation.")
@@ -115,17 +119,16 @@ flags.DEFINE_string("loss_fn", "pirank_simple_loss",
 flags.DEFINE_boolean('ste', True, 'Whether to use the Straight-Through Estimator')
 flags.DEFINE_integer('ndcg_k', 15, 'NDCG@k cutoff when using NS-NDCG loss')
 
-FLAGS = flags.FLAGS
-FLAGS(sys.argv)
 
 # NS addition
 if FLAGS.submit:
     FLAGS.exp = FLAGS.output_dir.split('/')[-1]
     print(FLAGS.output_dir.split('/'))
+
 flag_dict = {}
 for attr,flag_obj in FLAGS.__flags.items():
     flag_dict[attr] = getattr(FLAGS, attr)
-print(flag_dict["loss"])
+print(flag_dict)
 
 _PRIMARY_HEAD = "primary_head"
 _SECONDARY_HEAD = "secondary_head"
@@ -376,7 +379,6 @@ def make_score_fn():
     return _score_fn
 
 
-# @ex.capture
 def pirank_simple_loss(labels, logits, weights):
     '''
     Modeled after tensorflow_ranking/python/losses.py _loss_fn
@@ -462,8 +464,7 @@ def train_and_eval():
     os.environ['IS_TEST'] = ''
 
     features, labels = load_libsvm_data(flag_dict['train_path'], flag_dict['list_size'])
-    train_input_fn, train_hook = get_train_inputs(features, labels,
-                                                  flag_dict['train_batch_size'])
+    train_input_fn, train_hook = get_train_inputs(features, labels, flag_dict['train_batch_size'])
 
     features_vali, labels_vali = load_libsvm_data(flag_dict['vali_path'],
                                                   flag_dict['list_size'])
@@ -550,12 +551,6 @@ def train_and_eval():
             start_delay_secs=0,
             throttle_secs=30)
 
-    # Train and validate
-    # num_epochs = flag_dict['num_epochs']
-    # for epoch in range(num_epochs):
-    #     print('Epoch {} of {}'.format(epoch + 1, num_epochs))
-    #     print('Training and Validating')
-    #     tf.estimator.train_and_evaluate(estimator, train_spec, vali_spec)
     tf.estimator.train_and_evaluate(estimator, train_spec, vali_spec)
 
     # Evaluate on the test data.
@@ -573,7 +568,7 @@ class Runner(submitit.helpers.Checkpointable):
 
 
 
-def main():
+def main(_):
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.INFO)
 
 
@@ -616,6 +611,6 @@ if __name__ == "__main__":
     flags.mark_flag_as_required("test_path")
     flags.mark_flag_as_required("output_dir")
 
-    main()
-    # tf.compat.v1.app.run()
+    # main()
+    tf.compat.v1.app.run()
     # Goes inside main after
