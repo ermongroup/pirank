@@ -103,6 +103,7 @@ flags.DEFINE_float(
 # Additional learning options
 flags.DEFINE_string("optimizer", "Adagrad", "The optimizer for gradient descent.")
 flags.DEFINE_integer('num_epochs', 200, 'Number of epochs to train, set 0 to just test')
+# flags.DEFINE_integer('early_stopping', False, 'Use early stopping')
 
 # NeuralSort-related
 flags.DEFINE_float('tau', 5, 'temperature (dependent meaning)')
@@ -560,7 +561,7 @@ def get_eval_metric_fns():
     metric_fns.update({
         "metric/ndcg@%d" % topn: tfr.metrics.make_ranking_metric_fn(
             tfr.metrics.RankingMetricKey.NDCG, topn=topn)
-        for topn in [1, 3, 5, 10]
+        for topn in [1, 3, 5, 10, 15]
     })
     return metric_fns
 
@@ -570,12 +571,14 @@ def train_and_eval():
     import os
     os.environ['IS_TEST'] = ''
 
-    features, labels = load_libsvm_data(flag_dict['train_path'], flag_dict['list_size'])
-    train_input_fn, train_hook = get_train_inputs(features, labels, flag_dict['train_batch_size'])
+    if flag_dict['num_train_steps'] > 0:
+        features, labels = load_libsvm_data(flag_dict['train_path'],
+                                            flag_dict['list_size'])
+        train_input_fn, train_hook = get_train_inputs(features, labels, flag_dict['train_batch_size'])
 
-    features_vali, labels_vali = load_libsvm_data(flag_dict['vali_path'],
-                                                  flag_dict['list_size'])
-    vali_input_fn, vali_hook = get_eval_inputs(features_vali, labels_vali)
+        features_vali, labels_vali = load_libsvm_data(flag_dict['vali_path'],
+                                                      flag_dict['list_size'])
+        vali_input_fn, vali_hook = get_eval_inputs(features_vali, labels_vali)
 
     features_test, labels_test = load_libsvm_data(flag_dict['test_path'],
                                                   flag_dict['list_size'])
@@ -635,30 +638,38 @@ def train_and_eval():
         config=tf.estimator.RunConfig(
             flag_dict['output_dir'], save_checkpoints_steps=1000))
 
-    train_spec = tf.estimator.TrainSpec(
-        input_fn=train_input_fn,
-        hooks=[train_hook],
-        max_steps=flag_dict['num_train_steps'])
-    # Export model to accept tf.Example when group_size = 1.
-    if flag_dict['group_size'] == 1:
-        vali_spec = tf.estimator.EvalSpec(
-            input_fn=vali_input_fn,
-            hooks=[vali_hook],
-            steps=1,
-            exporters=tf.estimator.LatestExporter(
-                "latest_exporter",
-                serving_input_receiver_fn=make_serving_input_fn()),
-            start_delay_secs=0,
-            throttle_secs=30)
-    else:
-        vali_spec = tf.estimator.EvalSpec(
-            input_fn=vali_input_fn,
-            hooks=[vali_hook],
-            steps=1,
-            start_delay_secs=0,
-            throttle_secs=30)
+    if flag_dict['num_train_steps'] > 0:
+        train_spec = tf.estimator.TrainSpec(
+            input_fn=train_input_fn,
+            hooks=[train_hook],
+            max_steps=flag_dict['num_train_steps'])
+        # Export model to accept tf.Example when group_size = 1.
+        if flag_dict['group_size'] == 1:
+            vali_spec = tf.estimator.EvalSpec(
+                input_fn=vali_input_fn,
+                hooks=[vali_hook],
+                steps=1,
+                # exporters=tf.estimator.LatestExporter(
+                #     "latest_exporter",
+                #     serving_input_receiver_fn=make_serving_input_fn()),
+                exporters=tf.estimator.BestExporter(
+                    "best_exporter",
+                    serving_input_receiver_fn=make_serving_input_fn()),
+                start_delay_secs=0,
+                throttle_secs=30)
+        else:
+            vali_spec = tf.estimator.EvalSpec(
+                input_fn=vali_input_fn,
+                hooks=[vali_hook],
+                steps=1,
+                start_delay_secs=0,
+                throttle_secs=30)
 
-    tf.estimator.train_and_evaluate(estimator, train_spec, vali_spec)
+        # if flag_dict['early_stopping']:
+        #     iterator_initializer_hook = tf.estimator.experimental.stop_if_no_decrease_hook()
+        # else:
+        #
+        tf.estimator.train_and_evaluate(estimator, train_spec, vali_spec)
 
     # Evaluate on the test data.
     print('Testing')
