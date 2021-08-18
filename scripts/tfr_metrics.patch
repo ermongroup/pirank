@@ -1,0 +1,128 @@
+--- metrics.py	2021-08-16 05:53:45.270665351 +0000
++++ metrics.py.pirank	2021-08-16 06:08:06.207049762 +0000
+@@ -33,6 +33,26 @@
+ 
+ _DEFAULT_RANK_DISCOUNT_FN = lambda rank: tf.math.log(2.) / tf.math.log1p(rank)
+ 
++def metrics_mean(metric, values, weights):
++  import os
++  if not os.environ.get('IS_TEST') == '1':
++    return tf.compat.v1.metrics.mean(values, weights)
++  root = os.environ.get('METRICS_DIR', '/tmp/metrics/default')
++  name = metric.__class__.__name__
++  topn = getattr(metric, '_topn', 0)
++  import time
++  path = root + f'/{name}/{topn}/{time.time()}/'
++  try:
++    os.makedirs(path)
++  except:
++    pass
++  value_op, update_op = tf.compat.v1.metrics.mean(values, weights)
++  from tensorflow.python.ops import io_ops
++  save_op = io_ops._save(filename=path + tf.strings.as_string(tf.timestamp()), tensor_names=['values'], tensors=[values])
++  with tf.compat.v1.control_dependencies([save_op]):
++    update_op = tf.identity(update_op)
++  return value_op, update_op
++
+ 
+ class RankingMetricKey(object):
+   """Ranking metric key strings."""
+@@ -299,7 +319,7 @@
+                                (labels, predictions, weights)):
+     # TODO: Add mask argument for metric.compute() call
+     mrr, per_list_weights = metric.compute(labels, predictions, weights)
+-    return tf.compat.v1.metrics.mean(mrr, per_list_weights)
++    return metrics_mean(metric, mrr, per_list_weights)
+ 
+ 
+ def average_relevance_position(labels, predictions, weights=None, name=None):
+@@ -326,7 +346,7 @@
+     # TODO: Add mask argument for metric.compute() call
+     per_list_arp, per_list_weights = metric.compute(labels, predictions,
+                                                     weights)
+-  return tf.compat.v1.metrics.mean(per_list_arp, per_list_weights)
++  return metrics_mean(metric, per_list_arp, per_list_weights)
+ 
+ 
+ def precision(labels, predictions, weights=None, topn=None, name=None):
+@@ -351,7 +371,7 @@
+     # TODO: Add mask argument for metric.compute() call
+     precision_at_k, per_list_weights = metric.compute(labels, predictions,
+                                                       weights)
+-  return tf.compat.v1.metrics.mean(precision_at_k, per_list_weights)
++  return metrics_mean(metric, precision_at_k, per_list_weights)
+ 
+ 
+ def recall(labels, predictions, weights=None, topn=None, name=None):
+@@ -375,7 +395,7 @@
+                                (labels, predictions, weights)):
+     # TODO: Add mask argument for metric.compute() call.
+     recall_at_k, per_list_weights = metric.compute(labels, predictions, weights)
+-  return tf.compat.v1.metrics.mean(recall_at_k, per_list_weights)
++  return metrics_mean(metric, recall_at_k, per_list_weights)
+ 
+ 
+ def mean_average_precision(labels,
+@@ -408,7 +428,7 @@
+     # TODO: Add mask argument for metric.compute() call
+     per_list_map, per_list_weights = metric.compute(labels, predictions,
+                                                     weights)
+-  return tf.compat.v1.metrics.mean(per_list_map, per_list_weights)
++  return metrics_mean(metric, per_list_map, per_list_weights)
+ 
+ 
+ def precision_ia(labels, predictions, weights=None, topn=None, name=None):
+@@ -433,7 +453,7 @@
+     # TODO: Add mask argument for metric.compute() call
+     precision_at_k, per_list_weights = metric.compute(labels, predictions,
+                                                       weights)
+-  return tf.compat.v1.metrics.mean(precision_at_k, per_list_weights)
++  return metrics_mean(metric, precision_at_k, per_list_weights)
+ 
+ 
+ def normalized_discounted_cumulative_gain(
+@@ -472,7 +492,7 @@
+     # TODO: Add mask argument for metric.compute() call
+     per_list_ndcg, per_list_weights = metric.compute(labels, predictions,
+                                                      weights)
+-  return tf.compat.v1.metrics.mean(per_list_ndcg, per_list_weights)
++  return metrics_mean(metric, per_list_ndcg, per_list_weights)
+ 
+ 
+ def discounted_cumulative_gain(labels,
+@@ -503,7 +523,7 @@
+                                (labels, predictions, weights)):
+     # TODO: Add mask argument for metric.compute() call
+     dcg, per_list_weights = metric.compute(labels, predictions, weights)
+-  return tf.compat.v1.metrics.mean(dcg, per_list_weights)
++  return metrics_mean(metric, dcg, per_list_weights)
+ 
+ 
+ def alpha_discounted_cumulative_gain(
+@@ -549,7 +569,7 @@
+                                (labels, predictions, weights)):
+     # TODO: Add mask argument for metric.compute() call
+     alpha_dcg, per_list_weights = metric.compute(labels, predictions, weights)
+-  return tf.compat.v1.metrics.mean(alpha_dcg, per_list_weights)
++  return metrics_mean(metric, alpha_dcg, per_list_weights)
+ 
+ 
+ def ordered_pair_accuracy(labels, predictions, weights=None, name=None):
+@@ -577,7 +597,7 @@
+     # TODO: Add mask argument for metric.compute() call
+     per_list_opa, per_list_weights = metric.compute(labels, predictions,
+                                                     weights)
+-  return tf.compat.v1.metrics.mean(per_list_opa, per_list_weights)
++  return metrics_mean(metric, per_list_opa, per_list_weights)
+ 
+ 
+ def binary_preference(labels,
+@@ -616,7 +636,7 @@
+     # TODO: Add mask argument for metric.compute() call
+     per_list_bpref, per_list_weights = metric.compute(labels, predictions,
+                                                       weights)
+-  return tf.compat.v1.metrics.mean(per_list_bpref, per_list_weights)
++  return metrics_mean(metric, per_list_bpref, per_list_weights)
+ 
+ 
+ def eval_metric(metric_fn, **kwargs):
