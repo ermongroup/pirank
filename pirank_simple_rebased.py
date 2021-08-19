@@ -420,6 +420,54 @@ def neuralsort_permutation_loss(labels, logits, features):
     return loss
 
 
+# @ex.capture
+def pirank_arp_simple_loss(labels, logits, features):
+    '''
+    Modeled after tensorflow_ranking/python/losses.py _loss_fn
+    :param labels: True scores
+    :param logits: Scores from the NN
+    :param tau: Temperature parameter
+    :return:
+    '''
+    tau = flag_dict["tau"]
+    taustar = flag_dict["taustar"]
+    ste = flag_dict["ste"]
+
+    with tf.name_scope("pirank_scope"):
+        false_tensor = tf.convert_to_tensor(False)
+        evaluation = tf.placeholder_with_default(false_tensor, ())
+
+        temperature = tf.cond(evaluation,
+                              false_fn=lambda: tf.convert_to_tensor(
+                                  tau, dtype=tf.float32),
+                              true_fn=lambda: tf.convert_to_tensor(
+                                  1e-10, dtype=tf.float32)  # simulate hard sort
+                              )
+
+        is_label_valid = tfr.utils.is_label_valid(labels)
+        labels = tf.where(is_label_valid, labels, tf.zeros_like(labels))
+        logits = tf.where(is_label_valid, logits, -1e-6 * tf.ones_like(logits) +
+                          tf.reduce_min(input_tensor=logits, axis=1, keepdims=True))
+        logits = tf.expand_dims(logits, 2, name="logits")
+        labels = tf.expand_dims(labels, 2, name="labels")
+        list_size = tf.shape(input=labels)[1]
+
+        if ste:
+            P_hat_backward = util.neuralsort(logits, temperature)
+            P_hat_forward = util.neuralsort(logits, taustar)
+            P_hat = P_hat_backward + tf.stop_gradient(P_hat_forward - P_hat_backward)
+        else:
+            P_hat = util.neuralsort(logits, temperature)
+        P_hat = tf.identity(P_hat, name="P_hat")
+        labels = tf.cast(labels, dtype=tf.float32, name="labels")
+        position = tf.cast(tf.range(1, list_size + 1), dtype=tf.float32, name="arp_position")
+        sorted_labels = tf.linalg.matmul(P_hat, labels)
+        numerator = tf.reduce_sum(sorted_labels * position, axis=1, name="arp_numerator")
+        denominator = tf.reduce_sum(labels, axis=1, name="arp_denominator")
+        loss = numerator / (1 + denominator)
+        return tf.reduce_sum(loss)
+
+
 def pirank_simple_mean_loss(labels, logits, features):
     '''
     Modeled after tensorflow_ranking/python/losses.py _loss_fn
