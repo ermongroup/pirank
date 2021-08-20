@@ -91,8 +91,6 @@ flags.DEFINE_integer("num_features", 136, "Number of features per document.")
 flags.DEFINE_integer("list_size", 100, "List size used for training.")
 flags.DEFINE_integer("group_size", 1, "Group size used in score function.")
 
-flags.DEFINE_string("loss", "pairwise_logistic_loss",
-                    "The RankingLossKey for the primary loss function.")
 flags.DEFINE_string(
     "secondary_loss", None, "The RankingLossKey for the secondary loss for "
                             "multi-objective learning.")
@@ -639,7 +637,7 @@ def train_and_eval():
         optimizer = tf.compat.v1.train.AdagradOptimizer(
             learning_rate=flag_dict['learning_rate'])
 
-    loss_fn = flag_dict['loss']
+    loss_fn = flag_dict['loss_fn']
     if loss_fn == 'pirank_simple_loss':
         loss_function = pirank_simple_loss
     elif loss_fn == 'neuralsort_permutation_loss':
