@@ -642,6 +642,8 @@ def train_and_eval():
         loss_function = pirank_simple_loss
     elif loss_fn == 'neuralsort_permutation_loss':
         loss_function = neuralsort_permutation_loss
+    elif loss_fn == 'pirank_arp_simple_loss':
+        loss_function = pirank_arp_simple_loss
     elif loss_fn == 'lambda_rank_loss':
         loss_function = tfr.losses.make_loss_fn('pairwise_logistic_loss',
                                                 lambda_weight=tfr.losses.create_ndcg_lambda_weight(topn=ndcg_k))
