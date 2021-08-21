@@ -646,7 +646,7 @@ def train_and_eval():
         loss_function = pirank_arp_simple_loss
     elif loss_fn == 'lambda_rank_loss':
         loss_function = tfr.losses.make_loss_fn('pairwise_logistic_loss',
-                                                lambda_weight=tfr.losses.create_ndcg_lambda_weight(topn=ndcg_k))
+                                                lambda_weight=tfr.losses.create_ndcg_lambda_weight(topn=flag_dict['ndcg_k']))
     else:
         loss_function = tfr.losses.make_loss_fn(loss_fn)
 
