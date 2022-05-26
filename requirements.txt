@@ -1,6 +1,6 @@
 numpy==1.15.4
 scipy==1.1.0
-tensorflow==1.14.0
+tensorflow==2.7.2
 # Uncomment below if using GPU
 # tensorflow-gpu==1.14.0
 # setGPU==0.0.7
